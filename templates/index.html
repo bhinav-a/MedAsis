@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MedAsis — Medicine Assistant</title>
+    <meta name="description" content="AI-powered medicine assistant. Upload medicine images, get OCR-extracted details, and ask questions about your medicine inventory.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=2">
+    <!-- Marked.js for Markdown parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <!-- ─── Header ─────────────────────────────────────────────────── -->
+    <header id="app-header">
+        <div class="header-content">
+            <div class="logo">
+                <span class="logo-icon">💊</span>
+                <h1>MedAsis</h1>
+            </div>
+            <p class="tagline">AI-Powered Medicine Assistant</p>
+        </div>
+    </header>
+
+    <main id="app-main">
+        <!-- ─── Alert Banner ────────────────────────────────────────── -->
+        <div id="alert-banner" class="alert-banner hidden">
+            <div class="alert-icon">🚨</div>
+            <div class="alert-content">
+                <strong id="alert-title">Expiry Alert</strong>
+                <p id="alert-text"></p>
+            </div>
+            <button class="alert-dismiss" onclick="dismissAlert()">✕</button>
+        </div>
+
+        <!-- ─── Tabs ────────────────────────────────────────────────── -->
+        <nav id="tab-nav" class="tab-nav">
+            <button class="tab-btn active" data-tab="upload" id="tab-upload">
+                <span class="tab-icon">📤</span> Upload
+            </button>
+            <button class="tab-btn" data-tab="chat" id="tab-chat">
+                <span class="tab-icon">💬</span> Ask
+            </button>
+            <button class="tab-btn" data-tab="inventory" id="tab-inventory">
+                <span class="tab-icon">📋</span> Inventory
+                <span class="badge hidden" id="inventory-badge">0</span>
+            </button>
+        </nav>
+
+        <!-- ─── Upload Tab ──────────────────────────────────────────── -->
+        <section id="section-upload" class="tab-section active">
+            <div class="card glass">
+                <h2>Upload Medicine Image</h2>
+                <p class="card-subtitle">Take a photo of your medicine packaging and we'll extract all the details</p>
+
+                <div id="drop-zone" class="drop-zone">
+                    <div class="drop-zone-content">
+                        <span class="drop-icon">📷</span>
+                        <p>Drag & drop your image here</p>
+                        <span class="drop-or">or</span>
+                        <label class="btn btn-primary" for="file-input">Browse Files</label>
+                        <input type="file" id="file-input" accept="image/*" hidden>
+                    </div>
+                    <img id="preview-image" class="preview-image hidden" alt="Preview">
+                </div>
+
+                <button id="upload-btn" class="btn btn-accent full-width hidden" disabled>
+                    <span class="btn-text">🔍 Extract & Store</span>
+                    <span class="btn-loader hidden"></span>
+                </button>
+            </div>
+
+            <!-- Upload Result -->
+            <div id="upload-result" class="card glass hidden">
+                <div class="result-header">
+                    <h3 id="result-title">Extraction Results</h3>
+                    <span id="result-badge" class="status-badge"></span>
+                </div>
+                <div id="result-grid" class="result-grid"></div>
+                <div id="expiry-warning" class="expiry-warning hidden"></div>
+            </div>
+        </section>
+
+        <!-- ─── Chat Tab ────────────────────────────────────────────── -->
+        <section id="section-chat" class="tab-section">
+            <div class="card glass chat-card">
+                <h2>Ask About Your Medicines</h2>
+                <p class="card-subtitle">Ask any question about your medicine inventory</p>
+
+                <div id="chat-messages" class="chat-messages">
+                    <div class="chat-welcome">
+                        <span class="welcome-icon">🤖</span>
+                        <p>Hello! I'm your medicine assistant. Ask me anything about your medicines — dosage, expiry dates, interactions, or inventory questions.</p>
+                    </div>
+                </div>
+
+                <div class="chat-input-area">
+                    <input type="text" id="chat-input" placeholder="e.g., What medicines do I have for headache?" autocomplete="off">
+                    <button id="chat-send" class="btn btn-accent">
+                        <span class="btn-text">Send</span>
+                        <span class="btn-loader hidden"></span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- ─── Inventory Tab ───────────────────────────────────────── -->
+        <section id="section-inventory" class="tab-section">
+            <div class="card glass">
+                <div class="inventory-header">
+                    <h2>Medicine Inventory</h2>
+                    <button id="refresh-btn" class="btn btn-sm" onclick="loadInventory()">🔄 Refresh</button>
+                </div>
+
+                <!-- Stats -->
+                <div id="stats-row" class="stats-row">
+                    <div class="stat-card">
+                        <span class="stat-value" id="stat-total">0</span>
+                        <span class="stat-label">Total</span>
+                    </div>
+                    <div class="stat-card stat-ok">
+                        <span class="stat-value" id="stat-ok">0</span>
+                        <span class="stat-label">Valid</span>
+                    </div>
+                    <div class="stat-card stat-warning">
+                        <span class="stat-value" id="stat-expiring">0</span>
+                        <span class="stat-label">Expiring Soon</span>
+                    </div>
+                    <div class="stat-card stat-danger">
+                        <span class="stat-value" id="stat-expired">0</span>
+                        <span class="stat-label">Expired</span>
+                    </div>
+                </div>
+
+                <!-- Medicine List -->
+                <div id="medicine-list" class="medicine-list">
+                    <p class="empty-state">No medicines in inventory. Upload a medicine image to get started!</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ─── Footer ─────────────────────────────────────────────────── -->
+    <footer id="app-footer">
+        <p>MedStore — Your AI Medicine Assistant &bull; Built with ❤️</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='app.js') }}?v=2"></script>
+</body>
+</html>

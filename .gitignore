@@ -1,0 +1,33 @@
+# Environments
+gpu_env/
+venv/
+env/
+.env
+.venv/
+
+# Database
+medicine_db/
+
+# Uploads
+uploads/
+
+# Credentials / Keys
+*.json
+gen-lang-client-*.json
+
+# Python caching
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Sample Images / PDFs
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# OS generated files
+.DS_Store
+Thumbs.db

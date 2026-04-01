@@ -1,0 +1,360 @@
+import os
+import re
+from datetime import datetime
+import chromadb
+from chromadb.utils import embedding_functions
+from ocr_utils import extract_medicine_from_image
+from dateutil import parser as date_parser
+from dateutil.relativedelta import relativedelta
+
+# Try to import Gemini
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+
+class MedicineRAG:
+    def __init__(self, db_path="./medicine_db"):
+        """
+        Initialize the Medicine RAG system.
+        Args:
+            db_path: Path to store the ChromaDB database.
+        """
+        self.db_path = db_path
+        # Initialize ChromaDB client
+        self.client = chromadb.PersistentClient(path=db_path)
+        # Use default embedding function (sentence-transformers)
+        self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
+        # Get or create collection for medicines
+        self.collection = self.client.get_or_create_collection(
+            name="medicines",
+            embedding_function=self.embedding_function,
+            metadata={"hnsw:space": "cosine"}
+        )
+        # Initialize Gemini if available
+        self.llm = None
+        if GEMINI_AVAILABLE:
+            api_key = os.getenv("GEMINI_API_KEY")
+            if api_key:
+                genai.configure(api_key=api_key)
+                model_name = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+                self.llm = genai.GenerativeModel(model_name)
+
+
+
+    # ── Date Utilities ────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_date(date_str):
+        """Try to parse a date string in any format using dateutil."""
+        if not date_str:
+            return None
+        try:
+            # Normalize 2-digit year at the end of the string to 4-digit year (e.g. JUL.24 -> JUL.2024)
+            # This prevents dateutil from confusing YY with DD and defaulting to the current year.
+            date_str = re.sub(r'(^|[/.\-\s])(\d{2})$', r'\g<1>20\2', date_str.strip())
+            
+            # Default to the end of the current month if day is missing (standard for medicines)
+            dt = date_parser.parse(date_str.replace('.', '-'))
+            if len(date_str) <= 8: # likely just month/year (e.g. 07/2024)
+                # push to the last day of that month
+                dt = dt + relativedelta(day=31)
+            return dt
+        except Exception:
+            return None
+
+    def _get_expiry_status(self, exp_date_str):
+        """Return (days_until_expiry, status_label) for a given expiry date string."""
+        exp_date = self._parse_date(exp_date_str)
+        if not exp_date:
+            return None, "unknown"
+        days = (exp_date - datetime.now()).days
+        if days < 0:
+            return days, "expired"
+        elif days <= 30:
+            return days, "expiring_soon"
+        elif days <= 90:
+            return days, "expiring_warning"
+        else:
+            return days, "ok"
+
+    # ── CRUD Operations ───────────────────────────────────────────────
+
+    def _generate_medicine_id(self, medicine_info):
+        """Generate a unique ID for a medicine based on its properties."""
+        name_part = medicine_info["name"] or "unknown"
+        exp_part = medicine_info["exp_date"] or datetime.now().strftime("%Y%m%d")
+        clean_name = re.sub(r'[^\w]', '', name_part)[:20].lower()
+        clean_exp = re.sub(r'[^\w]', '', exp_part)
+        return f"med_{clean_name}_{clean_exp}"
+
+    def _find_existing_medicine(self, medicine_info):
+        """
+        Check if a medicine with the same name already exists in the DB.
+        Returns the existing ID or None.
+        """
+        if not medicine_info.get("name"):
+            return None
+        all_meds = self.collection.get(include=["metadatas"])
+        if all_meds and all_meds['metadatas']:
+            search_name = medicine_info["name"].lower().strip()
+            for i, meta in enumerate(all_meds['metadatas']):
+                existing_name = (meta.get("name") or "").lower().strip()
+                if existing_name and existing_name == search_name:
+                    return all_meds['ids'][i]
+        return None
+
+    def add_medicine_from_image(self, image_path="image.png"):
+        """
+        Process a medicine image: Gemini Vision extracts info, store in vector DB.
+        If the same medicine already exists, it will be updated.
+        Returns (medicine_info, expiry_status, is_update).
+        """
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
+        print(f"Processing image: {image_path}")
+        # Gemini Vision returns structured dict directly
+        medicine_info = extract_medicine_from_image(image_path)
+
+        # Check for existing medicine to update
+        existing_id = self._find_existing_medicine(medicine_info)
+        is_update = existing_id is not None
+
+        if is_update:
+            med_id = existing_id
+            self.collection.delete(ids=[med_id])
+            print(f"♻️ Updating existing medicine: {medicine_info['name']}")
+        else:
+            med_id = self._generate_medicine_id(medicine_info)
+
+        # Build the document text for vector search
+        raw_text = medicine_info.get("raw_text") or ""
+        other_info = medicine_info.get("other_info") or []
+        full_text = f"{medicine_info.get('name', '')} {medicine_info.get('dose', '')} {raw_text} {' '.join(other_info) if isinstance(other_info, list) else other_info}"
+
+        # Standardize dates to MM/YYYY format
+        for date_key in ['mfd', 'exp_date']:
+            val = medicine_info.get(date_key)
+            if val:
+                parsed = self._parse_date(val)
+                if parsed:
+                    medicine_info[date_key] = parsed.strftime('%m/%Y')
+
+        # Prepare metadata (ChromaDB requires string values)
+        metadata = {
+            "name": medicine_info.get("name") or "",
+            "mfd": medicine_info.get("mfd") or "",
+            "exp_date": medicine_info.get("exp_date") or "",
+            "dose": medicine_info.get("dose") or "",
+            "batch_no": medicine_info.get("batch_no") or "",
+            "manufacturer": medicine_info.get("manufacturer") or "",
+            "added_date": datetime.now().isoformat(),
+            "image_path": image_path,
+        }
+
+        self.collection.add(
+            documents=[full_text],
+            metadatas=[metadata],
+            ids=[med_id]
+        )
+
+        # Compute expiry status
+        days, status = self._get_expiry_status(medicine_info.get("exp_date"))
+        expiry_info = {"days": days, "status": status}
+
+        action = "updated" if is_update else "added"
+        print(f"✅ Medicine {action}: {medicine_info.get('name') or 'Unknown'}")
+        return medicine_info, expiry_info, is_update
+
+    def delete_medicine(self, med_id):
+        """Delete a medicine by its ID."""
+        self.collection.delete(ids=[med_id])
+
+    # ── Query & RAG ───────────────────────────────────────────────────
+
+    def query_medicines(self, question, n_results=5):
+        """
+        Query the medicine database using vector similarity.
+        Returns a list of matching medicines.
+        """
+        count = self.collection.count()
+        if count == 0:
+            return []
+        n = min(n_results, count)
+        results = self.collection.query(
+            query_texts=[question],
+            n_results=n,
+            include=["documents", "metadatas", "distances"]
+        )
+
+        medicines = []
+        if results['documents'] and results['documents'][0]:
+            for i, doc in enumerate(results['documents'][0]):
+                medicine = {
+                    "document": doc,
+                    "metadata": results['metadatas'][0][i],
+                    "distance": results['distances'][0][i] if 'distances' in results else None,
+                }
+                medicines.append(medicine)
+        return medicines
+
+    def ask(self, question, n_results=5):
+        """
+        RAG-powered question answering.
+        Retrieves relevant medicines, then uses Gemini to generate a natural-language answer.
+        Falls back to raw results if Gemini is unavailable.
+        """
+        medicines = self.query_medicines(question, n_results)
+        if not medicines:
+            return {
+                "answer": "No medicines found in your inventory. Please upload a medicine image first.",
+                "sources": []
+            }
+
+        # Build context from retrieved documents
+        context_parts = []
+        for i, med in enumerate(medicines, 1):
+            meta = med["metadata"]
+            days, status = self._get_expiry_status(meta.get("exp_date"))
+            status_text = f"({status}, {days} days)" if days is not None else "(expiry unknown)"
+            context_parts.append(
+                f"Medicine {i}:\n"
+                f"  Name: {meta.get('name', 'Unknown')}\n"
+                f"  Dose: {meta.get('dose', 'N/A')}\n"
+                f"  MFD: {meta.get('mfd', 'N/A')}\n"
+                f"  Expiry: {meta.get('exp_date', 'N/A')} {status_text}\n"
+                f"  Batch: {meta.get('batch_no', 'N/A')}\n"
+                f"  Manufacturer: {meta.get('manufacturer', 'N/A')}\n"
+                f"  Raw OCR Text: {med['document'][:200]}"
+            )
+        context = "\n\n".join(context_parts)
+
+        # Generate answer using Gemini
+        if self.llm:
+            prompt = (
+                "You are MedAsis, an AI-powered personal medicine assistant. \n"
+                "The user will ask questions about their medicine inventory or general medicine queries.\n\n"
+                f"CURRENT DATE: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+                "IMPORTANT RULES:\n"
+                "- If the user asks if they have a medicine or about its expiry, answer strictly using the MEDICINE INVENTORY data below.\n"
+                "- If the user asks about the uses, side effects, or general information of a medicine, you MAY use your general medical knowledge to explain it, but clearly state that this is general information and not professional medical advice.\n"
+                "- If a medicine in their inventory is expired or expiring soon, prominently warn them.\n"
+                "- Be concise, helpful, and format your output beautifully with Markdown (bullet points, bold text).\n\n"
+                f"=== MEDICINE INVENTORY ===\n{context}\n\n"
+                f"=== USER QUESTION ===\n{question}\n\n"
+                "Answer:"
+            )
+            try:
+                response = self.llm.generate_content(prompt)
+                answer = response.text
+            except Exception as e:
+                answer = f"LLM error: {e}\n\nHere are the matching medicines:\n{context}"
+        else:
+            answer = f"(LLM not configured — showing raw results)\n\n{context}"
+
+        sources = [
+            {
+                "name": med["metadata"].get("name", "Unknown"),
+                "exp_date": med["metadata"].get("exp_date", ""),
+                "dose": med["metadata"].get("dose", ""),
+            }
+            for med in medicines
+        ]
+
+        return {"answer": answer, "sources": sources}
+
+    # ── Expiry Checks ─────────────────────────────────────────────────
+
+    def get_expiring_medicines(self, days_threshold=30):
+        """Get medicines expiring within the specified number of days."""
+        all_medicines = self.collection.get(include=["metadatas", "documents"])
+        expiring = []
+
+        if all_medicines['metadatas']:
+            for i, metadata in enumerate(all_medicines['metadatas']):
+                exp_date_str = metadata.get('exp_date', '')
+                days, status = self._get_expiry_status(exp_date_str)
+                if days is not None and 0 <= days <= days_threshold:
+                    expiring.append({
+                        "id": all_medicines['ids'][i],
+                        "document": all_medicines['documents'][i],
+                        "metadata": metadata,
+                        "days_until_expiry": days,
+                        "status": status,
+                    })
+
+        expiring.sort(key=lambda x: x['days_until_expiry'])
+        return expiring
+
+    def get_expired_medicines(self):
+        """Get medicines that have already expired."""
+        all_medicines = self.collection.get(include=["metadatas", "documents"])
+        expired = []
+
+        if all_medicines['metadatas']:
+            for i, metadata in enumerate(all_medicines['metadatas']):
+                exp_date_str = metadata.get('exp_date', '')
+                days, status = self._get_expiry_status(exp_date_str)
+                if days is not None and days < 0:
+                    expired.append({
+                        "id": all_medicines['ids'][i],
+                        "document": all_medicines['documents'][i],
+                        "metadata": metadata,
+                        "days_expired": abs(days),
+                        "status": "expired",
+                    })
+
+        expired.sort(key=lambda x: x['days_expired'])
+        return expired
+
+    def list_all_medicines(self):
+        """List all medicines in the database with expiry status."""
+        results = self.collection.get(include=["metadatas", "documents"])
+        medicines = []
+        if results['metadatas']:
+            for i, metadata in enumerate(results['metadatas']):
+                days, status = self._get_expiry_status(metadata.get('exp_date', ''))
+                medicines.append({
+                    "id": results['ids'][i],
+                    "document": results['documents'][i],
+                    "metadata": metadata,
+                    "days_until_expiry": days,
+                    "expiry_status": status,
+                })
+        return medicines
+
+
+# ── CLI usage ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    rag = MedicineRAG()
+
+    # Add medicine from image
+    try:
+        medicine_info, expiry_info, is_update = rag.add_medicine_from_image()
+        print("\nExtracted Medicine Info:")
+        for key, value in medicine_info.items():
+            if key != "raw_text":
+                print(f"  {key}: {value}")
+        print(f"\nExpiry Status: {expiry_info['status']} ({expiry_info['days']} days)")
+    except Exception as e:
+        print(f"Error processing image: {e}")
+
+    # Example query
+    print("\n--- RAG Query ---")
+    result = rag.ask("What medicines do I have?")
+    print(result["answer"])
+
+    # Check for expiring medicines
+    print("\n--- Expiring Medicines (next 30 days) ---")
+    expiring = rag.get_expiring_medicines(30)
+    if expiring:
+        for med in expiring:
+            print(f"  ⚠️ {med['metadata'].get('name', 'Unknown')} expires in {med['days_until_expiry']} days")
+    else:
+        print("  No medicines expiring in the next 30 days.")
