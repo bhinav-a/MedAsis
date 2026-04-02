@@ -21,6 +21,18 @@
                 <h1>MedAsis</h1>
             </div>
             <p class="tagline">AI-Powered Medicine Assistant</p>
+            <div class="user-menu">
+                <button id="user-btn" class="user-btn" onclick="toggleUserMenu()">
+                    <span class="user-icon">👤</span>
+                    <span id="user-name-display">User</span>
+                </button>
+                <div id="user-dropdown" class="user-dropdown hidden">
+                    <div class="user-info">
+                        <p id="user-email-display">user@example.com</p>
+                    </div>
+                    <button onclick="logoutUser()" class="logout-btn">Logout</button>
+                </div>
+            </div>
         </div>
     </header>
 

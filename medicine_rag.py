@@ -27,7 +27,7 @@ class MedicineRAG:
         self.client = chromadb.PersistentClient(path=db_path)
         # Use default embedding function (sentence-transformers)
         self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
-        # Get or create collection for medicines
+        # Shared fallback collection for legacy/unscoped usage
         self.collection = self.client.get_or_create_collection(
             name="medicines",
             embedding_function=self.embedding_function,
@@ -41,6 +41,26 @@ class MedicineRAG:
                 genai.configure(api_key=api_key)
                 model_name = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
                 self.llm = genai.GenerativeModel(model_name)
+
+    @staticmethod
+    def _user_filter(user_id):
+        """Build a Chroma metadata filter for a specific user."""
+        if not user_id:
+            return None
+        return {"user_id": str(user_id)}
+
+    def _collection_for_user(self, user_id=None):
+        """Return the Chroma collection for a specific user, or the shared fallback collection."""
+        if not user_id:
+            return self.collection
+
+        safe_user_id = re.sub(r"[^A-Za-z0-9_]", "_", str(user_id))[:48]
+        collection_name = f"medicines_{safe_user_id}"
+        return self.client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=self.embedding_function,
+            metadata={"hnsw:space": "cosine"}
+        )
 
 
 
@@ -90,14 +110,15 @@ class MedicineRAG:
         clean_exp = re.sub(r'[^\w]', '', exp_part)
         return f"med_{clean_name}_{clean_exp}"
 
-    def _find_existing_medicine(self, medicine_info):
+    def _find_existing_medicine(self, medicine_info, user_id=None):
         """
         Check if a medicine with the same name already exists in the DB.
         Returns the existing ID or None.
         """
         if not medicine_info.get("name"):
             return None
-        all_meds = self.collection.get(include=["metadatas"])
+        collection = self._collection_for_user(user_id)
+        all_meds = collection.get(include=["metadatas"])
         if all_meds and all_meds['metadatas']:
             search_name = medicine_info["name"].lower().strip()
             for i, meta in enumerate(all_meds['metadatas']):
@@ -106,7 +127,7 @@ class MedicineRAG:
                     return all_meds['ids'][i]
         return None
 
-    def add_medicine_from_image(self, image_path="image.png"):
+    def add_medicine_from_image(self, image_path="image.png", user_id=None):
         """
         Process a medicine image: Gemini Vision extracts info, store in vector DB.
         If the same medicine already exists, it will be updated.
@@ -118,14 +139,15 @@ class MedicineRAG:
         print(f"Processing image: {image_path}")
         # Gemini Vision returns structured dict directly
         medicine_info = extract_medicine_from_image(image_path)
+        collection = self._collection_for_user(user_id)
 
         # Check for existing medicine to update
-        existing_id = self._find_existing_medicine(medicine_info)
+        existing_id = self._find_existing_medicine(medicine_info, user_id=user_id)
         is_update = existing_id is not None
 
         if is_update:
             med_id = existing_id
-            self.collection.delete(ids=[med_id])
+            collection.delete(ids=[med_id])
             print(f"♻️ Updating existing medicine: {medicine_info['name']}")
         else:
             med_id = self._generate_medicine_id(medicine_info)
@@ -153,9 +175,10 @@ class MedicineRAG:
             "manufacturer": medicine_info.get("manufacturer") or "",
             "added_date": datetime.now().isoformat(),
             "image_path": image_path,
+            "user_id": str(user_id or ""),
         }
 
-        self.collection.add(
+        collection.add(
             documents=[full_text],
             metadatas=[metadata],
             ids=[med_id]
@@ -169,22 +192,24 @@ class MedicineRAG:
         print(f"✅ Medicine {action}: {medicine_info.get('name') or 'Unknown'}")
         return medicine_info, expiry_info, is_update
 
-    def delete_medicine(self, med_id):
+    def delete_medicine(self, med_id, user_id=None):
         """Delete a medicine by its ID."""
-        self.collection.delete(ids=[med_id])
+        collection = self._collection_for_user(user_id)
+        collection.delete(ids=[med_id])
 
     # ── Query & RAG ───────────────────────────────────────────────────
 
-    def query_medicines(self, question, n_results=5):
+    def query_medicines(self, question, n_results=5, user_id=None):
         """
         Query the medicine database using vector similarity.
         Returns a list of matching medicines.
         """
-        count = self.collection.count()
+        collection = self._collection_for_user(user_id)
+        count = collection.count()
         if count == 0:
             return []
         n = min(n_results, count)
-        results = self.collection.query(
+        results = collection.query(
             query_texts=[question],
             n_results=n,
             include=["documents", "metadatas", "distances"]
@@ -201,13 +226,13 @@ class MedicineRAG:
                 medicines.append(medicine)
         return medicines
 
-    def ask(self, question, n_results=5):
+    def ask(self, question, n_results=5, user_id=None):
         """
         RAG-powered question answering.
         Retrieves relevant medicines, then uses Gemini to generate a natural-language answer.
         Falls back to raw results if Gemini is unavailable.
         """
-        medicines = self.query_medicines(question, n_results)
+        medicines = self.query_medicines(question, n_results, user_id=user_id)
         if not medicines:
             return {
                 "answer": "No medicines found in your inventory. Please upload a medicine image first.",
@@ -268,9 +293,10 @@ class MedicineRAG:
 
     # ── Expiry Checks ─────────────────────────────────────────────────
 
-    def get_expiring_medicines(self, days_threshold=30):
+    def get_expiring_medicines(self, days_threshold=30, user_id=None):
         """Get medicines expiring within the specified number of days."""
-        all_medicines = self.collection.get(include=["metadatas", "documents"])
+        collection = self._collection_for_user(user_id)
+        all_medicines = collection.get(include=["metadatas", "documents"])
         expiring = []
 
         if all_medicines['metadatas']:
@@ -289,9 +315,10 @@ class MedicineRAG:
         expiring.sort(key=lambda x: x['days_until_expiry'])
         return expiring
 
-    def get_expired_medicines(self):
+    def get_expired_medicines(self, user_id=None):
         """Get medicines that have already expired."""
-        all_medicines = self.collection.get(include=["metadatas", "documents"])
+        collection = self._collection_for_user(user_id)
+        all_medicines = collection.get(include=["metadatas", "documents"])
         expired = []
 
         if all_medicines['metadatas']:
@@ -310,9 +337,10 @@ class MedicineRAG:
         expired.sort(key=lambda x: x['days_expired'])
         return expired
 
-    def list_all_medicines(self):
+    def list_all_medicines(self, user_id=None):
         """List all medicines in the database with expiry status."""
-        results = self.collection.get(include=["metadatas", "documents"])
+        collection = self._collection_for_user(user_id)
+        results = collection.get(include=["metadatas", "documents"])
         medicines = []
         if results['metadatas']:
             for i, metadata in enumerate(results['metadatas']):

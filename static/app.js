@@ -2,6 +2,66 @@
    MedStore — Frontend JavaScript
    ═══════════════════════════════════════════════════════════════════ */
 
+// ─── User Authentication ────────────────────────────────────────────
+
+/**
+ * Load and display current user info
+ */
+async function loadUserInfo() {
+    try {
+        const response = await fetch('/api/auth/user');
+        if (!response.ok) {
+            window.location.href = '/login';
+            return;
+        }
+        const data = await response.json();
+        document.getElementById('user-name-display').textContent = data.name || data.email;
+        document.getElementById('user-email-display').textContent = data.email;
+    } catch (error) {
+        console.error('Error loading user info:', error);
+        window.location.href = '/login';
+    }
+}
+
+/**
+ * Toggle user dropdown menu
+ */
+function toggleUserMenu() {
+    const dropdown = document.getElementById('user-dropdown');
+    dropdown.classList.toggle('hidden');
+}
+
+/**
+ * Close user menu when clicking outside
+ */
+document.addEventListener('click', (e) => {
+    const userBtn = document.getElementById('user-btn');
+    const dropdown = document.getElementById('user-dropdown');
+    if (!userBtn?.contains(e.target) && !dropdown?.contains(e.target)) {
+        dropdown?.classList.add('hidden');
+    }
+});
+
+/**
+ * Logout user
+ */
+async function logoutUser() {
+    try {
+        const response = await fetch('/api/auth/logout', { method: 'POST' });
+        if (response.ok) {
+            window.location.href = '/login';
+        } else {
+            alert('Logout failed. Please try again.');
+        }
+    } catch (error) {
+        console.error('Logout error:', error);
+        alert('An error occurred during logout.');
+    }
+}
+
+// Load user info on page load
+window.addEventListener('load', loadUserInfo);
+
 // ─── DOM References ─────────────────────────────────────────────────
 const tabBtns = document.querySelectorAll('.tab-btn');
 const tabSections = document.querySelectorAll('.tab-section');
@@ -23,15 +83,29 @@ const alertText = document.getElementById('alert-text');
 const inventoryBadge = document.getElementById('inventory-badge');
 
 let selectedFile = null;
+let inventoryRefreshTimer = null;
+
+function resetUploadState() {
+    selectedFile = null;
+    fileInput.value = '';
+    previewImg.src = '';
+    previewImg.classList.add('hidden');
+    uploadBtn.classList.add('hidden');
+    uploadBtn.disabled = true;
+}
 
 // ─── Tabs ───────────────────────────────────────────────────────────
 tabBtns.forEach(btn => {
     btn.addEventListener('click', () => {
         const tab = btn.dataset.tab;
+        const previousTab = document.querySelector('.tab-btn.active')?.dataset.tab;
         tabBtns.forEach(b => b.classList.remove('active'));
         tabSections.forEach(s => s.classList.remove('active'));
         btn.classList.add('active');
         document.getElementById(`section-${tab}`).classList.add('active');
+        if (previousTab === 'upload' && tab !== 'upload') {
+            resetUploadState();
+        }
         if (tab === 'inventory') loadInventory();
     });
 });
@@ -149,6 +223,21 @@ async function uploadMedicine() {
 
         // Refresh inventory count
         loadInventoryCount();
+
+        // Switch to inventory so the new medicine is visible immediately
+        const inventoryTab = document.querySelector('.tab-btn[data-tab="inventory"]');
+        if (inventoryTab) {
+            inventoryTab.click();
+        }
+
+        // Refresh inventory page shortly after the upload completes
+        if (inventoryRefreshTimer) {
+            clearTimeout(inventoryRefreshTimer);
+        }
+        inventoryRefreshTimer = setTimeout(() => {
+            loadInventory();
+            loadInventoryCount();
+        }, 10000);
 
     } catch (err) {
         showAlert('Network Error', err.message);
