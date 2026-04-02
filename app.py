@@ -1,6 +1,7 @@
 import os
 import json
 import re
+from datetime import timedelta
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
@@ -14,6 +15,10 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-change-in-production')
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', 'false').lower() == 'true'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=int(os.getenv('SESSION_LIFETIME_HOURS', '12')))
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff'}
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -21,9 +26,10 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 # Initialize Supabase
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+SUPABASE_SERVICE_ROLE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
 
-if SUPABASE_URL and SUPABASE_KEY:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+if SUPABASE_URL and (SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY):
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY)
 else:
     supabase = None
     print("⚠️  Warning: Supabase credentials not configured. Authentication will not work.")
@@ -73,6 +79,38 @@ def login():
     return render_template('auth.html')
 
 
+@app.route('/reset-password')
+def reset_password():
+    """Render the password reset page."""
+    return render_template(
+        'reset_password.html',
+        supabase_url=SUPABASE_URL or '',
+        supabase_key=SUPABASE_KEY or ''
+    )
+
+
+@app.route('/api/auth/reset-password', methods=['POST'])
+def auth_reset_password():
+    """Send a Supabase password reset email."""
+    if not supabase:
+        return jsonify({"error": "Authentication service not configured"}), 503
+
+    data = request.get_json() or {}
+    email = data.get('email', '').strip()
+    if not email:
+        return jsonify({"error": "Email is required", "field": "email"}), 400
+
+    try:
+        redirect_url = url_for('reset_password', _external=True)
+        supabase.auth.reset_password_for_email(email, {"redirect_to": redirect_url})
+        return jsonify({
+            "success": True,
+            "message": "If the email exists, a password reset link has been sent."
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
 @app.route('/api/auth/signin', methods=['POST'])
 def auth_signin():
     """Sign in user with email and password."""
@@ -91,6 +129,8 @@ def auth_signin():
     try:
         response = supabase.auth.sign_in_with_password({"email": email, "password": password})
         user = response.user
+        session.clear()
+        session.permanent = True
         session['user_id'] = user.id
         session['user_email'] = user.email
         session['user_name'] = user.user_metadata.get('name', '') if user.user_metadata else ''
@@ -144,6 +184,8 @@ def auth_signup():
 
         # If email confirmations are enabled in Supabase, the user must verify before login.
         if getattr(user, 'email_confirmed_at', None):
+            session.clear()
+            session.permanent = True
             session['user_id'] = user.id
             session['user_email'] = user.email
             session['user_name'] = name

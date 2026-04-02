@@ -6,13 +6,40 @@
 function toggleAuth() {
     const signinSection = document.getElementById('signin-section');
     const signupSection = document.getElementById('signup-section');
-    
-    signinSection.classList.toggle('active');
-    signupSection.classList.toggle('active');
-    
+    const resetSection = document.getElementById('reset-section');
+
+    const showSignup = signinSection.classList.contains('active');
+    signinSection.classList.toggle('active', !showSignup);
+    signupSection.classList.toggle('active', showSignup);
+    resetSection?.classList.remove('active');
+
     // Clear forms and errors
     document.getElementById('signin-form').reset();
     document.getElementById('signup-form').reset();
+    document.getElementById('reset-form')?.reset();
+    clearAllErrors();
+    clearAlert();
+}
+
+function showSignInForm() {
+    setActiveSection('signin-section');
+}
+
+function showResetForm() {
+    setActiveSection('reset-section');
+}
+
+function setActiveSection(sectionId) {
+    ['signin-section', 'signup-section', 'reset-section'].forEach(id => {
+        const section = document.getElementById(id);
+        if (section) {
+            section.classList.toggle('active', id === sectionId);
+        }
+    });
+
+    document.getElementById('signin-form')?.reset();
+    document.getElementById('signup-form')?.reset();
+    document.getElementById('reset-form')?.reset();
     clearAllErrors();
     clearAlert();
 }
@@ -193,6 +220,55 @@ document.getElementById('signup-form')?.addEventListener('submit', async (e) => 
     } catch (error) {
         showAlert('An error occurred. Please try again.', 'error');
         console.error('Sign up error:', error);
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+    }
+});
+
+// Handle Reset Password Request
+document.getElementById('reset-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    clearAllErrors();
+    clearAlert();
+
+    const resetEmail = document.getElementById('reset-email').value.trim();
+    const btn = document.getElementById('reset-btn');
+
+    if (!resetEmail) {
+        showFieldError('reset-email', 'Email is required');
+        return;
+    }
+    if (!isValidEmail(resetEmail)) {
+        showFieldError('reset-email', 'Invalid email format');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.classList.add('loading');
+
+    try {
+        const response = await fetch('/api/auth/reset-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: resetEmail })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            if (data.field) {
+                showFieldError(`reset-${data.field}`, data.error);
+            } else {
+                showAlert(data.error || 'Password reset failed', 'error');
+            }
+        } else {
+            showAlert(data.message || 'Reset email sent. Check your inbox.', 'success');
+            setTimeout(() => setActiveSection('signin-section'), 2500);
+        }
+    } catch (error) {
+        showAlert('An error occurred. Please try again.', 'error');
+        console.error('Reset password error:', error);
     } finally {
         btn.disabled = false;
         btn.classList.remove('loading');
